@@ -1,0 +1,109 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+  html, body, #root {
+    height: 100%;
+    overflow: hidden;
+  }
+  body {
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    -webkit-font-smoothing: antialiased;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.16);
+    background-clip: content-box;
+  }
+  ::selection {
+    background: rgba(124, 92, 255, 0.35);
+  }
+}
+
+@layer components {
+  .panel {
+    @apply bg-bg-1 border border-line rounded-xl shadow-panel;
+  }
+  .panel-inset {
+    @apply bg-bg-2 border border-line rounded-lg;
+  }
+  .titlebar {
+    -webkit-app-region: drag;
+  }
+  .titlebar-button {
+    -webkit-app-region: no-drag;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3 h-9 text-sm font-medium
+           transition-colors disabled:opacity-50 disabled:cursor-not-allowed
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/60;
+  }
+  .btn-primary {
+    @apply btn bg-brand text-white hover:bg-brand-400 shadow-glow;
+  }
+  .btn-secondary {
+    @apply btn bg-bg-3 text-ink hover:bg-bg-4 border border-line;
+  }
+  .btn-ghost {
+    @apply btn text-ink-dim hover:bg-bg-3 hover:text-ink;
+  }
+  .btn-danger {
+    @apply btn bg-danger/15 text-danger hover:bg-danger/25 border border-danger/30;
+  }
+  .input {
+    @apply w-full bg-bg-2 border border-line rounded-lg px-3 h-9 text-sm
+           focus:outline-none focus:border-brand focus:ring-2 focus:ring-brand/30
+           placeholder:text-ink-faint transition;
+  }
+  .label {
+    @apply text-xs uppercase tracking-wide text-ink-dim font-medium;
+  }
+  .pill {
+    @apply inline-flex items-center gap-1 px-2 h-6 text-[11px] uppercase tracking-wide
+           rounded-md bg-bg-3 text-ink-dim border border-line;
+  }
+  .glow-ring {
+    box-shadow: 0 0 0 1px rgba(124,92,255,.3), 0 0 30px -6px rgba(124,92,255,.55);
+  }
+  .gradient-text {
+    background-image: linear-gradient(90deg, #a994ff, #22d3ee 60%, #34e3b1);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .skeleton {
+    background: linear-gradient(90deg, rgba(255,255,255,0.04), rgba(255,255,255,0.10), rgba(255,255,255,0.04));
+    background-size: 200% 100%;
+    @apply animate-shimmer rounded-md;
+  }
+}
+
+.cm-editor.cm-focused {
+  outline: none !important;
+}
+.cm-editor {
+  height: 100%;
+}
+/* Force visible text selection inside CodeMirror */
+.cm-editor .cm-selectionBackground,
+.cm-editor.cm-focused .cm-selectionBackground,
+.cm-editor .cm-content ::selection,
+.cm-editor .cm-line ::selection {
+  background: rgba(124, 92, 255, 0.55) !important;
+}

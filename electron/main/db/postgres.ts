@@ -1,0 +1,193 @@
+import pg from 'pg';
+import type { Driver } from './driver';
+import type {
+  ColumnMeta,
+  ColumnType,
+  ConnectionConfig,
+  QueryResult,
+  SchemaDatabase,
+  SchemaTable
+} from '@shared/types';
+
+const TYPE_MAP: Record<number, ColumnType> = {
+  16: 'boolean',
+  20: 'number',
+  21: 'number',
+  23: 'number',
+  700: 'number',
+  701: 'number',
+  1700: 'number',
+  1082: 'date',
+  1083: 'date',
+  1114: 'date',
+  1184: 'date',
+  114: 'json',
+  3802: 'json'
+};
+
+function mapType(oid: number): ColumnType {
+  return TYPE_MAP[oid] ?? 'string';
+}
+
+export class PostgresDriver implements Driver {
+  private pool: pg.Pool | null = null;
+  private cfg: ConnectionConfig | null = null;
+
+  async connect(cfg: ConnectionConfig): Promise<{ serverVersion: string }> {
+    this.cfg = cfg;
+    this.pool = new pg.Pool({
+      host: cfg.host,
+      port: cfg.port,
+      database: cfg.database,
+      user: cfg.username,
+      password: cfg.password,
+      ssl: cfg.ssl ? { rejectUnauthorized: false } : undefined,
+      max: 5,
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 10_000
+    });
+    const res = await this.pool.query('SELECT version() as v');
+    return { serverVersion: String(res.rows[0]?.v ?? 'postgres') };
+  }
+
+  async disconnect(): Promise<void> {
+    await this.pool?.end();
+    this.pool = null;
+  }
+
+  async run(
+    query: string,
+    opts: { signal?: AbortSignal; database?: string | null } = {}
+  ): Promise<QueryResult> {
+    if (!this.pool) throw new Error('Not connected');
+    const { signal, database } = opts;
+    const client = await this.pool.connect();
+    const start = performance.now();
+    const onAbort = () =>
+      client.query('SELECT pg_cancel_backend(pg_backend_pid())').catch(() => {});
+    signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      if (database) {
+        const safe = database.replace(/"/g, '""');
+        await client.query(`SET search_path TO "${safe}", public`).catch(() => {});
+      }
+      const res = await client.query({ text: query, rowMode: 'array' });
+      const fields = res.fields ?? [];
+      const columns: ColumnMeta[] = fields.map((f) => ({
+        name: f.name,
+        type: mapType(f.dataTypeID),
+        dbType: String(f.dataTypeID)
+      }));
+      const rows = (res.rows as unknown[][]).map((row) => {
+        const obj: Record<string, unknown> = {};
+        columns.forEach((c, i) => {
+          obj[c.name] = normalize(row[i]);
+        });
+        return obj;
+      });
+      return {
+        columns,
+        rows,
+        rowCount: rows.length,
+        affectedRows: res.rowCount ?? undefined,
+        durationMs: Math.round(performance.now() - start),
+        query
+      };
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
+      client.release();
+    }
+  }
+
+  async introspect(): Promise<SchemaDatabase[]> {
+    if (!this.pool) throw new Error('Not connected');
+
+    const dbRow = await this.pool
+      .query<{ d: string }>('SELECT current_database() as d')
+      .catch(() => ({ rows: [] as { d: string }[] }));
+    const dbName = dbRow.rows[0]?.d ?? this.cfg?.database ?? 'postgres';
+
+    const tables = await this.pool.query<{
+      table_schema: string;
+      table_name: string;
+      table_type: string;
+    }>(
+      `SELECT table_schema, table_name, table_type
+         FROM information_schema.tables
+        WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+          AND table_schema NOT LIKE 'pg\\_%' ESCAPE '\\'
+        ORDER BY table_schema, table_name`
+    );
+    const cols = await this.pool.query<{
+      table_schema: string;
+      table_name: string;
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+    }>(
+      `SELECT table_schema, table_name, column_name, data_type, is_nullable
+         FROM information_schema.columns
+        WHERE table_schema NOT IN ('pg_catalog','information_schema')
+          AND table_schema NOT LIKE 'pg\\_%' ESCAPE '\\'`
+    );
+    const colMap = new Map<string, ColumnMeta[]>();
+    for (const c of cols.rows) {
+      const key = `${c.table_schema}.${c.table_name}`;
+      const list = colMap.get(key) ?? [];
+      list.push({
+        name: c.column_name,
+        type: mapPgType(c.data_type),
+        dbType: c.data_type,
+        nullable: c.is_nullable === 'YES'
+      });
+      colMap.set(key, list);
+    }
+    const allTables: SchemaTable[] = tables.rows.map((t) => ({
+      name: t.table_name,
+      schema: t.table_schema,
+      kind: t.table_type === 'VIEW' ? 'view' : 'table',
+      columns: colMap.get(`${t.table_schema}.${t.table_name}`) ?? []
+    }));
+
+    const others = await this.pool
+      .query<{ datname: string }>(
+        `SELECT datname FROM pg_database
+          WHERE datistemplate = false
+            AND datname <> $1
+            AND datname NOT IN ('postgres')
+          ORDER BY datname
+          LIMIT 30`,
+        [dbName]
+      )
+      .catch(() => ({ rows: [] as { datname: string }[] }));
+
+    return [
+      { name: dbName, tables: allTables },
+      ...others.rows.map((r) => ({ name: r.datname, tables: [] as SchemaTable[] }))
+    ];
+  }
+
+  async sample(table: SchemaTable, limit = 100): Promise<QueryResult> {
+    const ident = `"${(table.schema ?? 'public').replace(/"/g, '""')}"."${table.name.replace(
+      /"/g,
+      '""'
+    )}"`;
+    return this.run(`SELECT * FROM ${ident} LIMIT ${limit}`);
+  }
+}
+
+function mapPgType(t: string): ColumnType {
+  const lower = t.toLowerCase();
+  if (lower.includes('int') || lower.includes('numeric') || lower.includes('real') || lower.includes('double')) return 'number';
+  if (lower.includes('bool')) return 'boolean';
+  if (lower.includes('json')) return 'json';
+  if (lower.includes('date') || lower.includes('time')) return 'date';
+  return 'string';
+}
+
+function normalize(v: unknown): unknown {
+  if (v === null || v === undefined) return null;
+  if (v instanceof Date) return v.toISOString();
+  if (typeof v === 'object' && Buffer.isBuffer(v)) return `\\x${v.toString('hex')}`;
+  return v;
+}
