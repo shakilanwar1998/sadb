@@ -4,10 +4,17 @@ import type {
   ColumnMeta,
   ColumnType,
   ConnectionConfig,
+  EditableSource,
   QueryResult,
+  RowUpdate,
   SchemaDatabase,
-  SchemaTable
+  SchemaTable,
+  UpdateResult
 } from '@shared/types';
+
+// mysql2 FieldPacket exposes server-side flags but doesn't type them. Bit 2
+// (PRI_KEY_FLAG) marks a column that participates in the source table's PK.
+const PRI_KEY_FLAG = 0x2;
 
 const MYSQL_TYPE_CODES: Record<number, ColumnType> = {
   1: 'number', 2: 'number', 3: 'number', 4: 'number', 5: 'number',
@@ -87,12 +94,40 @@ export class MySqlDriver implements Driver {
       }
       const columns: ColumnMeta[] = fieldList.map((f) => {
         const code = typeof f.type === 'number' ? f.type : undefined;
+        const raw = f as unknown as {
+          schema?: string;
+          db?: string;
+          orgTable?: string;
+          table?: string;
+          orgName?: string;
+          flags?: number | string[];
+        };
+        const sourceSchema = raw.schema || raw.db || undefined;
+        const sourceTable = raw.orgTable || raw.table || undefined;
+        const sourceColumn = raw.orgName || f.name || undefined;
+        const isPrimaryKey = hasPriKeyFlag(raw.flags);
         return {
           name: f.name,
           type: mapTypeCode(code),
-          dbType: String(f.type ?? '')
+          dbType: String(f.type ?? ''),
+          sourceSchema,
+          sourceTable,
+          sourceColumn,
+          isPrimaryKey
         };
       });
+      const editable = deriveEditable(columns);
+      if (!editable && columns.length > 0) {
+        console.warn(
+          '[mysql] no editable metadata derived from result',
+          columns.map((c) => ({
+            name: c.name,
+            sourceTable: c.sourceTable,
+            sourceColumn: c.sourceColumn,
+            isPrimaryKey: c.isPrimaryKey
+          }))
+        );
+      }
       const normalized = (rows as Record<string, unknown>[]).map((r) => {
         const out: Record<string, unknown> = {};
         for (const c of columns) {
@@ -106,7 +141,8 @@ export class MySqlDriver implements Driver {
         rows: normalized,
         rowCount: normalized.length,
         durationMs: Math.round(performance.now() - start),
-        query
+        query,
+        editable
       };
     } finally {
       signal?.removeEventListener('abort', onAbort);
@@ -175,4 +211,61 @@ export class MySqlDriver implements Driver {
     const ident = `${schema}\`${table.name.replace(/`/g, '``')}\``;
     return this.run(`SELECT * FROM ${ident} LIMIT ${limit}`);
   }
+
+  async update(payload: RowUpdate): Promise<UpdateResult> {
+    if (!this.conn) throw new Error('Not connected');
+    const changeKeys = Object.keys(payload.changes);
+    const idKeys = Object.keys(payload.identity);
+    if (changeKeys.length === 0) return { affectedRows: 0 };
+    if (idKeys.length === 0) {
+      throw new Error('Cannot update row: no primary key columns supplied');
+    }
+    const ident = qualifyMysql(payload.schema, payload.table);
+    const setClause = changeKeys.map((k) => `${quoteMysql(k)} = ?`).join(', ');
+    const whereClause = idKeys.map((k) => `${quoteMysql(k)} = ?`).join(' AND ');
+    const sql = `UPDATE ${ident} SET ${setClause} WHERE ${whereClause}`;
+    const params = [
+      ...changeKeys.map((k) => normalizeParam(payload.changes[k])),
+      ...idKeys.map((k) => normalizeParam(payload.identity[k]))
+    ];
+    const [res] = await this.conn.query<mysql.ResultSetHeader>(sql, params);
+    return { affectedRows: res.affectedRows ?? 0 };
+  }
+}
+
+function hasPriKeyFlag(flags: number | string[] | undefined): boolean | undefined {
+  if (typeof flags === 'number') return (flags & PRI_KEY_FLAG) !== 0;
+  if (Array.isArray(flags)) return flags.includes('PRI_KEY') || flags.includes('PRIMARY KEY');
+  return undefined;
+}
+
+function deriveEditable(columns: ColumnMeta[]): EditableSource | undefined {
+  const tables = new Set<string>();
+  const schemas = new Set<string>();
+  for (const c of columns) {
+    if (c.sourceTable) tables.add(c.sourceTable);
+    if (c.sourceSchema) schemas.add(c.sourceSchema);
+  }
+  if (tables.size !== 1) return undefined;
+  const [table] = tables;
+  const schema = schemas.size === 1 ? Array.from(schemas)[0] : undefined;
+  const pk = columns
+    .filter((c) => c.isPrimaryKey && c.sourceColumn)
+    .map((c) => c.sourceColumn as string);
+  if (pk.length === 0) return undefined;
+  return { schema, table, primaryKey: pk };
+}
+
+function quoteMysql(ident: string): string {
+  return `\`${ident.replace(/`/g, '``')}\``;
+}
+
+function qualifyMysql(schema: string | undefined, table: string): string {
+  return schema ? `${quoteMysql(schema)}.${quoteMysql(table)}` : quoteMysql(table);
+}
+
+function normalizeParam(v: unknown): unknown {
+  if (v === undefined) return null;
+  if (v !== null && typeof v === 'object') return JSON.stringify(v);
+  return v;
 }

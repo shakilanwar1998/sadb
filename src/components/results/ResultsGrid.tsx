@@ -416,14 +416,20 @@ function EditableCell({
         ? JSON.stringify(value)
         : String(value);
   const [draft, setDraft] = useState(initial);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const displayRef = useRef<HTMLDivElement>(null);
+  const [minHeight, setMinHeight] = useState<number>(0);
 
   useEffect(() => {
     if (isEditing) {
+      setMinHeight(displayRef.current?.offsetHeight ?? 0);
       setDraft(initial);
       requestAnimationFrame(() => {
-        inputRef.current?.focus();
-        inputRef.current?.select();
+        const el = inputRef.current;
+        if (!el) return;
+        el.focus();
+        el.select();
+        autoSize(el);
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -431,13 +437,17 @@ function EditableCell({
 
   if (isEditing) {
     return (
-      <input
+      <textarea
         ref={inputRef}
         value={draft}
-        onChange={(e) => setDraft(e.target.value)}
+        rows={1}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          autoSize(e.currentTarget);
+        }}
         onBlur={() => commit()}
         onKeyDown={(e) => {
-          if (e.key === 'Enter') {
+          if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             commit();
           } else if (e.key === 'Escape') {
@@ -445,7 +455,8 @@ function EditableCell({
             onCancel();
           }
         }}
-        className="w-full h-7 px-2 -mx-1 rounded border border-emerald-400/70 ring-2 ring-emerald-500/30 outline-none bg-[#0a1424] text-[13px] text-slate-100"
+        style={{ minHeight: minHeight ? `${minHeight}px` : undefined }}
+        className="block w-full px-2 py-1 -mx-1 -my-1 rounded border border-emerald-400/70 ring-2 ring-emerald-500/30 outline-none bg-[#0a1424] text-[13px] text-slate-100 resize-none whitespace-pre-wrap break-words"
       />
     );
 
@@ -484,6 +495,7 @@ function EditableCell({
 
   return (
     <div
+      ref={displayRef}
       onDoubleClick={onStartEdit}
       className={cn(
         'cursor-text select-text rounded px-1 -mx-1 min-h-[24px] text-[13px]',
@@ -494,6 +506,11 @@ function EditableCell({
       {display}
     </div>
   );
+}
+
+function autoSize(el: HTMLTextAreaElement): void {
+  el.style.height = 'auto';
+  el.style.height = `${el.scrollHeight}px`;
 }
 
 function renderDisplay(value: unknown, type: ColumnType): React.ReactNode {

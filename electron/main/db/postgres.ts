@@ -4,9 +4,12 @@ import type {
   ColumnMeta,
   ColumnType,
   ConnectionConfig,
+  EditableSource,
   QueryResult,
+  RowUpdate,
   SchemaDatabase,
-  SchemaTable
+  SchemaTable,
+  UpdateResult
 } from '@shared/types';
 
 const TYPE_MAP: Record<number, ColumnType> = {
@@ -78,6 +81,8 @@ export class PostgresDriver implements Driver {
         type: mapType(f.dataTypeID),
         dbType: String(f.dataTypeID)
       }));
+      await annotatePgColumns(client, fields, columns);
+      const editable = deriveEditable(columns);
       const rows = (res.rows as unknown[][]).map((row) => {
         const obj: Record<string, unknown> = {};
         columns.forEach((c, i) => {
@@ -91,7 +96,8 @@ export class PostgresDriver implements Driver {
         rowCount: rows.length,
         affectedRows: res.rowCount ?? undefined,
         durationMs: Math.round(performance.now() - start),
-        query
+        query,
+        editable
       };
     } finally {
       signal?.removeEventListener('abort', onAbort);
@@ -174,6 +180,122 @@ export class PostgresDriver implements Driver {
     )}"`;
     return this.run(`SELECT * FROM ${ident} LIMIT ${limit}`);
   }
+
+  async update(payload: RowUpdate): Promise<UpdateResult> {
+    if (!this.pool) throw new Error('Not connected');
+    const changeKeys = Object.keys(payload.changes);
+    const idKeys = Object.keys(payload.identity);
+    if (changeKeys.length === 0) return { affectedRows: 0 };
+    if (idKeys.length === 0) {
+      throw new Error('Cannot update row: no primary key columns supplied');
+    }
+    const ident = qualifyPg(payload.schema, payload.table);
+    const params: unknown[] = [];
+    const setClause = changeKeys
+      .map((k) => {
+        params.push(normalizeParam(payload.changes[k]));
+        return `${quotePg(k)} = $${params.length}`;
+      })
+      .join(', ');
+    const whereClause = idKeys
+      .map((k) => {
+        params.push(normalizeParam(payload.identity[k]));
+        return `${quotePg(k)} = $${params.length}`;
+      })
+      .join(' AND ');
+    const sql = `UPDATE ${ident} SET ${setClause} WHERE ${whereClause}`;
+    const res = await this.pool.query(sql, params);
+    return { affectedRows: res.rowCount ?? 0 };
+  }
+}
+
+async function annotatePgColumns(
+  client: pg.PoolClient,
+  fields: pg.FieldDef[],
+  columns: ColumnMeta[]
+): Promise<void> {
+  const tableIds = new Set<number>();
+  for (const f of fields) {
+    if (f.tableID && f.tableID > 0) tableIds.add(f.tableID);
+  }
+  if (tableIds.size === 0) return;
+  const ids = Array.from(tableIds);
+  let tableRows: Array<{ oid: number; schema: string; name: string }> = [];
+  let colRows: Array<{ oid: number; attnum: number; attname: string }> = [];
+  let pkRows: Array<{ oid: number; attnum: number }> = [];
+  try {
+    const t = await client.query<{ oid: string; schema: string; name: string }>(
+      `SELECT c.oid::int AS oid, n.nspname AS schema, c.relname AS name
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.oid = ANY($1::oid[])`,
+      [ids]
+    );
+    tableRows = t.rows.map((r) => ({ oid: Number(r.oid), schema: r.schema, name: r.name }));
+    const a = await client.query<{ oid: string; attnum: number; attname: string }>(
+      `SELECT attrelid::int AS oid, attnum, attname
+         FROM pg_attribute
+        WHERE attrelid = ANY($1::oid[]) AND attnum > 0 AND NOT attisdropped`,
+      [ids]
+    );
+    colRows = a.rows.map((r) => ({ oid: Number(r.oid), attnum: r.attnum, attname: r.attname }));
+    const p = await client.query<{ oid: string; attnum: number }>(
+      `SELECT i.indrelid::int AS oid, k.attnum
+         FROM pg_index i, unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+        WHERE i.indrelid = ANY($1::oid[]) AND i.indisprimary`,
+      [ids]
+    );
+    pkRows = p.rows.map((r) => ({ oid: Number(r.oid), attnum: r.attnum }));
+  } catch {
+    return;
+  }
+  const tableById = new Map(tableRows.map((r) => [r.oid, r]));
+  const colByKey = new Map(colRows.map((r) => [`${r.oid}:${r.attnum}`, r.attname]));
+  const pkSet = new Set(pkRows.map((r) => `${r.oid}:${r.attnum}`));
+  fields.forEach((f, i) => {
+    const oid = f.tableID;
+    const attnum = f.columnID;
+    if (!oid || !attnum) return;
+    const t = tableById.get(oid);
+    if (t) {
+      columns[i].sourceSchema = t.schema;
+      columns[i].sourceTable = t.name;
+    }
+    const name = colByKey.get(`${oid}:${attnum}`);
+    if (name) columns[i].sourceColumn = name;
+    columns[i].isPrimaryKey = pkSet.has(`${oid}:${attnum}`);
+  });
+}
+
+function deriveEditable(columns: ColumnMeta[]): EditableSource | undefined {
+  const tables = new Set<string>();
+  const schemas = new Set<string>();
+  for (const c of columns) {
+    if (c.sourceTable) tables.add(c.sourceTable);
+    if (c.sourceSchema) schemas.add(c.sourceSchema);
+  }
+  if (tables.size !== 1) return undefined;
+  const [table] = tables;
+  const schema = schemas.size === 1 ? Array.from(schemas)[0] : undefined;
+  const pk = columns
+    .filter((c) => c.isPrimaryKey && c.sourceColumn)
+    .map((c) => c.sourceColumn as string);
+  if (pk.length === 0) return undefined;
+  return { schema, table, primaryKey: pk };
+}
+
+function quotePg(ident: string): string {
+  return `"${ident.replace(/"/g, '""')}"`;
+}
+
+function qualifyPg(schema: string | undefined, table: string): string {
+  return schema ? `${quotePg(schema)}.${quotePg(table)}` : quotePg(table);
+}
+
+function normalizeParam(v: unknown): unknown {
+  if (v === undefined) return null;
+  if (v !== null && typeof v === 'object') return JSON.stringify(v);
+  return v;
 }
 
 function mapPgType(t: string): ColumnType {

@@ -1,8 +1,10 @@
 import type {
   ConnectionConfig,
   QueryResult,
+  RowUpdate,
   SchemaDatabase,
-  SchemaTable
+  SchemaTable,
+  UpdateResult
 } from '@shared/types';
 
 export interface Driver {
@@ -11,4 +13,5 @@ export interface Driver {
   run(query: string, opts?: { signal?: AbortSignal; database?: string | null }): Promise<QueryResult>;
   introspect(): Promise<SchemaDatabase[]>;
   sample(table: SchemaTable, limit?: number): Promise<QueryResult>;
+  update(payload: RowUpdate): Promise<UpdateResult>;
 }

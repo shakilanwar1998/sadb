@@ -4,8 +4,10 @@ import type {
   AiSettings,
   ConnectionConfig,
   QueryResult,
+  RowUpdate,
   SchemaDatabase,
   SchemaTable,
+  UpdateResult,
   AiQueryResponse
 } from '@shared/types';
 
@@ -31,7 +33,9 @@ const api = {
     run: (id: string, query: string, database?: string | null) =>
       ipcRenderer.invoke(IPC.query.run, { id, query, database }) as Promise<QueryResult>,
     cancel: (id: string) =>
-      ipcRenderer.invoke(IPC.query.cancel, id) as Promise<{ cancelled: boolean }>
+      ipcRenderer.invoke(IPC.query.cancel, id) as Promise<{ cancelled: boolean }>,
+    update: (id: string, update: RowUpdate) =>
+      ipcRenderer.invoke(IPC.query.update, { id, update }) as Promise<UpdateResult>
   },
   schema: {
     introspect: (id: string) =>

@@ -35,6 +35,16 @@ export interface ColumnMeta {
   type: ColumnType;
   dbType?: string;
   nullable?: boolean;
+  sourceSchema?: string;
+  sourceTable?: string;
+  sourceColumn?: string;
+  isPrimaryKey?: boolean;
+}
+
+export interface EditableSource {
+  schema?: string;
+  table: string;
+  primaryKey: string[];
 }
 
 export interface QueryResult {
@@ -45,6 +55,18 @@ export interface QueryResult {
   query: string;
   affectedRows?: number;
   warning?: string;
+  editable?: EditableSource;
+}
+
+export interface RowUpdate {
+  schema?: string;
+  table: string;
+  identity: Record<string, unknown>;
+  changes: Record<string, unknown>;
+}
+
+export interface UpdateResult {
+  affectedRows: number;
 }
 
 export interface QueryError {

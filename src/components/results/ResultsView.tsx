@@ -83,13 +83,55 @@ export function ResultsView({ tab }: Props) {
     });
   }
 
-  function saveChanges(): void {
-    if (editCount === 0) return;
-    const summary = Array.from(editsByRow.entries())
-      .map(([row, list]) => `row ${row + 1}: ${list.map((e) => e.column).join(', ')}`)
-      .join(' | ');
-    showToast('success', `Saved ${editCount} change(s) locally · ${summary}`);
-    setEdits({});
+  async function saveChanges(): Promise<void> {
+    if (editCount === 0 || !result) return;
+    if (!tab.connectionId) {
+      showToast('error', 'Open a connection before saving changes');
+      return;
+    }
+    if (!result.editable) {
+      showToast('error', explainNoEditable(result));
+      return;
+    }
+    const { schema, table, primaryKey } = result.editable;
+    const columnByName = new Map(result.columns.map((c) => [c.name, c]));
+    try {
+      let touched = 0;
+      const nextRows = result.rows.slice();
+      for (const [rowIndex, rowEdits] of editsByRow.entries()) {
+        const original = result.rows[rowIndex];
+        const identity: Record<string, unknown> = {};
+        for (const pk of primaryKey) {
+          const col = result.columns.find((c) => c.sourceColumn === pk);
+          const idVal = col ? original[col.name] : undefined;
+          if (idVal === undefined || idVal === null) {
+            throw new Error(`Missing primary key "${pk}" for row ${rowIndex + 1}`);
+          }
+          identity[pk] = idVal;
+        }
+        const changes: Record<string, unknown> = {};
+        for (const e of rowEdits) {
+          const col = columnByName.get(e.column);
+          const dbColumn = col?.sourceColumn ?? e.column;
+          changes[dbColumn] = e.value;
+        }
+        await window.sadb.query.update(tab.connectionId, {
+          schema,
+          table,
+          identity,
+          changes
+        });
+        const merged = { ...original };
+        for (const e of rowEdits) merged[e.column] = e.value;
+        nextRows[rowIndex] = merged;
+        touched += 1;
+      }
+      updateTab(tab.id, { result: { ...result, rows: nextRows } });
+      setEdits({});
+      showToast('success', `Saved ${touched} row(s) to ${table}`);
+    } catch (e) {
+      showToast('error', `Save failed: ${(e as Error).message}`);
+    }
   }
 
   function discardChanges(): void {
@@ -453,6 +495,26 @@ function ToolbarDropdown({
       )}
     </div>
   );
+}
+
+function explainNoEditable(result: QueryResult): string {
+  const tables = new Set(
+    result.columns.map((c) => c.sourceTable).filter((t): t is string => !!t)
+  );
+  if (tables.size === 0) {
+    return 'Cannot save: this result has no table metadata. Re-run the query after restarting the app.';
+  }
+  if (tables.size > 1) {
+    return `Cannot save: result spans multiple tables (${Array.from(tables).join(
+      ', '
+    )}). Inline edits only work for single-table queries.`;
+  }
+  const [table] = tables;
+  const hasPk = result.columns.some((c) => c.isPrimaryKey);
+  if (!hasPk) {
+    return `Cannot save: ${table} has no primary key columns in this result. Include the primary key in your SELECT.`;
+  }
+  return `Cannot save: editable metadata missing for ${table}. Re-run the query.`;
 }
 
 function applyEdits(

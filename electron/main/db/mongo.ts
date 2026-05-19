@@ -5,8 +5,10 @@ import type {
   ColumnType,
   ConnectionConfig,
   QueryResult,
+  RowUpdate,
   SchemaDatabase,
-  SchemaTable
+  SchemaTable,
+  UpdateResult
 } from '@shared/types';
 
 export class MongoDriver implements Driver {
@@ -99,6 +101,10 @@ export class MongoDriver implements Driver {
       this.db = this.client.db(table.schema);
     }
     return this.run(`db.${table.name}.find({}).limit(${limit})`);
+  }
+
+  async update(_payload: RowUpdate): Promise<UpdateResult> {
+    throw new Error('Inline row updates are not yet supported for MongoDB');
   }
 }
 

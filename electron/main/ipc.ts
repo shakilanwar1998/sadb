@@ -3,6 +3,7 @@ import { IPC } from '@shared/ipc-channels';
 import type {
   AiSettings,
   ConnectionConfig,
+  RowUpdate,
   SchemaTable
 } from '@shared/types';
 import { connections } from './db';
@@ -68,6 +69,15 @@ export function registerIpc(): void {
     connections.cancel(id);
     return { cancelled: true };
   });
+
+  ipcMain.handle(
+    IPC.query.update,
+    async (_e, args: { id: string; update: RowUpdate }) => {
+      const driver = connections.get(args.id);
+      if (!driver) throw new Error('Open the connection before saving changes');
+      return driver.update(args.update);
+    }
+  );
 
   // ---------- schema ----------
   ipcMain.handle(IPC.schema.introspect, async (_e, id: string) => {

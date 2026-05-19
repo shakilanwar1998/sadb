@@ -10,7 +10,8 @@ export const IPC = {
   },
   query: {
     run: 'query:run',
-    cancel: 'query:cancel'
+    cancel: 'query:cancel',
+    update: 'query:update'
   },
   schema: {
     introspect: 'schema:introspect',
